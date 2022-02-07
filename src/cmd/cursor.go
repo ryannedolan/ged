@@ -11,9 +11,13 @@ import (
   "log"
   "fmt"
   "bufio"
+  "regexp"
   "golang.org/x/crypto/ssh"
   "golang.org/x/term"
 )
+
+var leftBrackets = regexp.MustCompile("\\[|\\{|\\(")
+var rightBrackets = regexp.MustCompile("\\]|\\}|\\)")
 
 func main() {
   name := "/proc/cpuinfo"
@@ -43,7 +47,7 @@ func main() {
   }
   fs := rfs.NewRFS(c)
   f, _ := fs.Open(name)
-  buf := buffer.New(f)
+  buf := buffer.FromFile(f, buffer.Config{TabWidth: 8})
   cols, rows, err := term.GetSize(int(os.Stdin.Fd()))
   if err != nil {
     panic(err)
@@ -85,9 +89,13 @@ func main() {
       case 'x': w.Delete()
       case '0': w.CursorHome()
       case '$': w.CursorEnd()
+      case 'A': w.CursorEnd(); mode = 'i'
+      case '[': w.FindReverse(leftBrackets)
+      case ']': w.Find(rightBrackets)
+      case 13:  w.Run(&buffer.Buffer{})
       case 'q': return
       case '\033': return
-      default: fmt.Printf("\a")
+      default: fmt.Print("\a")
       }
     }
   }

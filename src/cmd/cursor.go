@@ -78,18 +78,14 @@ func main() {
       switch (rn) {
       case 'i': mode = 'i'
       case 'o': mode = 'o'
-      case 'h': w.CursorLeft()
-      case 'j': w.CursorDown()
-      case 'k': w.CursorUp()
-      case 'l': w.CursorRight()
-      case 'H': w.Left()
-      case 'J': w.DownN(10)
-      case 'K': w.UpN(10)
-      case 'L': w.Right()
+      case 'h': w.Left()
+      case 'j': w.Down()
+      case 'k': w.Up()
+      case 'l': w.Right()
       case 'x': w.Delete()
-      case '0': w.CursorHome()
-      case '$': w.CursorEnd()
-      case 'A': w.CursorEnd(); mode = 'i'
+      case '0': w.Home()
+      case '$': w.End()
+      case 'A': w.End(); mode = 'i'
       case '[': w.FindReverse(leftBrackets)
       case ']': w.Find(rightBrackets)
       case 13:  w.Run(&buffer.Buffer{})

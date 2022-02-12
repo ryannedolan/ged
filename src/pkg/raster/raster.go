@@ -4,9 +4,16 @@ import (
   "bytes"
   "fmt"
   "strings"
+  "unicode"
 )
 
 type Style int
+
+const (
+  NORMAL Style = 0
+  UNDERLINE Style = iota
+  HIGHLIGHT Style = iota
+)
 
 type char struct {
   c rune 
@@ -18,6 +25,7 @@ type Raster struct {
   rows, cols int
   chars [][]char
   dirty []bool
+  curi, curj int
   pending bytes.Buffer
 }
 
@@ -26,13 +34,14 @@ func New(rows, cols int) *Raster {
   for i := 0; i < rows; i++ {
     chars[i] = make([]char, cols)
     for j := 0; j < cols; j++ {
-      chars[i][j] = char{}
+      chars[i][j] = char{c: ' '}
     }
   }
-  return &Raster{rows, cols, chars, make([]bool, rows), bytes.Buffer{}}
+  return &Raster{rows, cols, chars, make([]bool, rows), 0, 0, bytes.Buffer{}}
 }
 
 func (r *Raster) Put(i, j int, c rune, style Style) {
+  assertGraphic(c)
   r.dirty[i] = true
   r.chars[i][j] = char{c, style}
 }
@@ -52,9 +61,7 @@ func (r *Raster) PutString(i, j, offset int, s string, style Style) {
     if sz == 0 {
       return
     }
-    if c == '\t' {
-      c = ' '
-    }
+    assertGraphic(c)
     if offset > 0 {
       // read runes but don't write them until we hit the offset
       offset -= 1
@@ -89,7 +96,12 @@ func (r *Raster) ClearWith(b rune) {
 }
 
 func (r *Raster) Clear() {
-  r.ClearWith(0)
+  r.ClearWith(' ')
+}
+
+func (r *Raster) Cursor(i, j int) {
+  r.curi = i
+  r.curj = j
 }
 
 // Reads any dirty lines. Callers should tail this stream to get continuous updates.
@@ -101,19 +113,34 @@ func (r *Raster) Read(buf []byte) (int, error) {
 
   styles := []string{"\033[0m", "\033[4m", "\033[7m"}
   prevStyle := Style(-1)
+  anyDirty := false
   for i := 0; i < r.rows; i++ {
     if r.dirty[i] {
-        fmt.Fprintf(&r.pending, "\033[%d;1H", i + 1)
+        anyDirty = true
+        fmt.Fprintf(&r.pending, "\033[%d;1H\033[2K", i + 1)
         line := r.chars[i]
-        for _, c := range line {
+        for j, c := range line {
           if c.style != prevStyle {
             r.pending.WriteString(styles[c.style])
             prevStyle = c.style
           }
-          r.pending.WriteRune(c.c)
+          if c.c != 0 {
+            r.pending.WriteRune(c.c)
+          }
+          r.chars[i][j] = char{' ', 0}
         }
       r.dirty[i] = false
     }
   }
+  // draw the cursor last
+  if anyDirty {
+    fmt.Fprintf(&r.pending, "\033[%d;%dH", r.curi + 1, r.curj + 1)
+  }
   return r.pending.Read(buf)
+}
+
+func assertGraphic(c rune) {
+  if !unicode.IsGraphic(c) {
+    panic("Tried to render unprintable character.")
+  }
 }

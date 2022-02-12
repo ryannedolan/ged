@@ -3,15 +3,12 @@ package main
 
 import (
   "../../src/pkg/rfs"
-  "../../src/pkg/raster"
   "../../src/pkg/buffer"
   "os"
   "io"
   "io/ioutil"
   "log"
-  "bufio"
   "golang.org/x/crypto/ssh"
-  "golang.org/x/term"
 )
 
 func main() {
@@ -43,27 +40,5 @@ func main() {
   fs := rfs.NewRFS(c)
   f, _ := fs.Open(name)
   buf := buffer.FromFile(f, buffer.Config{})
-  ras := raster.New(25, 80)
-  oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-  if err != nil {
-    panic(err)
-  }
-  defer term.Restore(int(os.Stdin.Fd()), oldState)
-  in := bufio.NewReader(os.Stdin)
-  w := buf.Window(25, 80)
-  for {
-    w.Render(ras)
-    io.Copy(os.Stdout, ras)
-    rn, _, err := in.ReadRune()
-    if err != nil {
-      panic(err)
-    }
-    switch (rn) {
-    case 'j': w.ScrollDown()
-    case 'k': w.ScrollUp()
-    case 'l': w.Right()
-    case 'h': w.Left()
-    case 'q': return
-    }
-  }
+  io.Copy(os.Stdout, buf)
 }

@@ -10,10 +10,7 @@ import (
   "regexp"
   "bytes"
 //  "fmt"
-  "os/exec"
 )
-
-const EOL = '\n'
 
 type node struct {
   c rune
@@ -31,10 +28,20 @@ type Buffer struct {
 }
 
 type Window struct {
+  Name string
   buffer *Buffer
   rows, cols int
   curi, curj int
   top, cur, mark *node
+}
+
+type Reader struct {
+  head, tail *node
+  pending bytes.Buffer
+}
+
+func EOL(c rune) bool {
+  return c == '\n'
 }
 
 func FromFile(f fs.File, config Config) *Buffer {
@@ -69,8 +76,49 @@ func (b *Buffer) Write(p []byte) (int, error) {
   }
 }
 
-func (b *Buffer) Window(rows, cols int) *Window {
-  return &Window{buffer: b, top: b.head, cur: b.head, rows: rows, cols: cols}
+func (b *Buffer) Clear() {
+  b.head, b.tail = nil, nil
+}
+
+func (b *Buffer) Window(name string, rows, cols int) *Window {
+  return &Window{Name: name, buffer: b, top: b.head, cur: b.head, rows: rows, cols: cols}
+}
+
+func (w *Window) Write(p []byte) (int, error) {
+  reader := bytes.NewBuffer(p)
+  count := 0
+  for {
+    c, n, err := reader.ReadRune()
+    count += n 
+    if n == 0 {
+      return count, nil
+    } else if err != nil {
+      return count, err
+    }
+    w.Insert(c)
+  }
+}
+
+func (w *Window) NewReader() *Reader {
+  first, last := w.buffer.head, w.buffer.tail
+  if w.mark != nil {
+    first, last = w.marked()
+  }    
+  return &Reader{head: first, tail: last}
+}
+
+func (r *Reader) Read(p []byte) (int, error) {
+  if r.pending.Len() != 0 {
+    return r.pending.Read(p)
+  }
+  if r.head == r.tail {
+    return 0, io.EOF
+  }
+  for r.head != r.tail {
+    r.pending.WriteRune(r.head.c)
+    r.head = r.head.next
+  }
+  return r.pending.Read(p)
 }
 
 func (b *Buffer) Append(c rune) {
@@ -92,11 +140,11 @@ func (b *Buffer) AppendString(s string) {
 
 func (b *Buffer) AppendLine(s string) {
   b.AppendString(s)
-  b.Append(EOL)
+  b.Append('\n')
 }
 
 func (b *Buffer) NewLine() {
-  b.Append(EOL)
+  b.Append('\n')
 }
 
 func (b *Buffer) WriteString(s string) (int, error) {
@@ -137,6 +185,17 @@ func (w *Window) Insert(c rune) {
   }
 }
 
+func (w *Window) InsertString(s string) {
+  reader := strings.NewReader(s)
+  for {
+    c, _, err := reader.ReadRune()
+    if err != nil {
+      return
+    }
+    w.Insert(c)
+  } 
+}
+
 func (w *Window) Backspace() {
   if w.cur.prev != nil {
     w.cur.prev.next = w.cur.next
@@ -155,33 +214,63 @@ func (w *Window) Overwrite(c rune) {
 
 func (w *Window) handleKeys(c rune) bool {
   switch (c) {
-  case '\r': w.Insert(EOL)
+  case '\r': w.Insert('\n')
   case 8, 0x7F: w.Backspace()
   default: return false
   }
   return true
-} 
+}
+
+func (w *Window) marked() (first, last *node) {
+  if w.mark == nil {
+    return
+  }
+  for pos := w.buffer.head; pos != nil; pos = pos.next {
+    if pos == w.cur || pos == w.mark {
+      if first == nil {
+        first = pos
+      } else if last == nil {
+        last = pos
+      } else {
+        break
+      }
+    }
+  }
+  return
+}
+
+func (w *Window) forMarked(f func(p *node)) {
+  first, last := w.marked()
+  for pos := first; pos != last; pos = pos.next {
+    f(pos)
+  }
+}
 
 // Delete the rune at the cursor's position.
 func (w *Window) Delete() {
-  if w.cur.next != nil {
-    w.cur.next.prev = w.cur.prev
-  }
-  if w.cur.prev != nil {
-    w.cur.prev.next = w.cur.next
-  }
-  w.cur = w.cur.next
+  w.forMarked(func(p *node) {
+    p.delete()
+  })
+  w.cur = w.cur.delete()
+  w.mark = nil
 }
 
 func (w *Window) Render(ras *raster.Raster) {
   i := 0
   j := 0
+  markDown := false
   for pos := w.top; pos != nil && i < w.rows; pos = pos.next {
+    if pos == w.mark {
+      markDown = !markDown
+    }
     if pos == w.cur {
       w.curi, w.curj = i, j
       ras.Cursor(i, j)
+      if w.mark != nil {
+        markDown = !markDown
+      }
     }
-    if pos.c == EOL {
+    if EOL(pos.c) {
       i++
       j = 0
     } else if pos.c == '\t' {
@@ -190,7 +279,11 @@ func (w *Window) Render(ras *raster.Raster) {
         j++
       }
     } else if j < w.cols {
-      ras.Put(i, j, pos.c, raster.NORMAL)
+      style := raster.NORMAL
+      if markDown {
+        style = raster.HIGHLIGHT
+      }
+      ras.Put(i, j, pos.c, style)
       j++
     }
   }
@@ -233,14 +326,14 @@ func (w *Window) Down() {
 }
 
 // move pointer just past next c
-func (p *node) seek(c rune) (pos *node, n int) {
+func (p *node) seek(f func(c rune) bool) (pos *node, n int) {
   pos = p
   // move at least once
   if pos.next != nil {
     pos = pos.next
     n++
   }
-  for pos.next != nil && pos.prev.c != c {
+  for pos.next != nil && !f(pos.prev.c) {
     pos = pos.next
     n++ 
   }
@@ -248,14 +341,14 @@ func (p *node) seek(c rune) (pos *node, n int) {
 }
 
 // move pointer just past previous c
-func (p *node) seekback(c rune) (pos *node, n int) {
+func (p *node) seekback(f func(c rune) bool) (pos *node, n int) {
   pos = p
   // move at least once
   if pos.prev != nil {
     pos = pos.prev
     n++
   }
-  for pos.prev != nil && pos.prev.c != c {
+  for pos.prev != nil && !f(pos.prev.c) {
     pos = pos.prev
     n++
   }
@@ -277,6 +370,18 @@ func (p *node) skipback(n int) (pos *node) {
   }
   return
 }
+
+func (p *node) delete() *node {
+  if p.next != nil {
+    p.next.prev = p.prev
+  }
+  if p.prev != nil {
+    p.prev.next = p.next
+  }
+  p = p.next
+  return p
+}
+
 
 func (w *Window) ScrollDown() {
   w.top, _ = w.top.seek(EOL)
@@ -305,7 +410,7 @@ func (w *Window) Home() (n int) {
 
 func (w *Window) End() (n int) {
   i := 0
-  for w.cur.next != nil && w.cur.c != EOL {
+  for w.cur.next != nil && !EOL(w.cur.c) {
     i++
     w.cur = w.cur.next
   }
@@ -316,8 +421,27 @@ func (w *Window) Mark() {
   w.mark = w.cur
 }
 
+func (w *Window) ClearMark() {
+  w.mark = nil
+}
+
 func (w *Window) MarkedText() string {
-  return "todo"
+  var builder strings.Builder
+  w.forMarked(func (p *node) {
+    builder.WriteRune(p.c)
+  })
+  return builder.String()
+}
+
+func (w *Window) Yank() string {
+  var builder strings.Builder
+  w.forMarked(func (p *node) {
+    builder.WriteRune(p.c)
+    p.delete()
+  })
+  builder.WriteRune(w.cur.c)
+  w.cur = w.cur.delete()
+  return builder.String()
 }
 
 func (w *Window) Find(pat *regexp.Regexp) {
@@ -328,11 +452,6 @@ func (w *Window) FindReverse(pat *regexp.Regexp) {
   //todo
 }
 
-func (w *Window) Run(in *Buffer) *Buffer {
-  out := &Buffer{Config: in.Config}
-  cmd := exec.Command("/bin/sh", "-c", w.buffer.String())
-  if err := cmd.Run(); err != nil {
-    //fmt.Fprintf(out, "ERROR: %e", err)
-  }
-  return out
+func (w *Window) Plumb() {
 }
+

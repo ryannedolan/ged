@@ -1,8 +1,8 @@
-// Stats arg[0] using stdin/out, which is expected to be a remote shell
 package main
 
 import (
   "../../src/pkg/rfs"
+  "../../src/pkg/rexec"
   "../../src/pkg/raster"
   "../../src/pkg/buffer"
   "os"
@@ -11,13 +11,66 @@ import (
   "log"
   "fmt"
   "bufio"
-  "regexp"
+  "bytes"
+//  "regexp"
   "golang.org/x/crypto/ssh"
   "golang.org/x/term"
 )
 
-var leftBrackets = regexp.MustCompile("\\[|\\{|\\(")
-var rightBrackets = regexp.MustCompile("\\]|\\}|\\)")
+var oldState *term.State
+var client *ssh.Client
+
+func readLine(prompt string) string {
+  term.Restore(int(os.Stdin.Fd()), oldState)
+  _, rows, _ := term.GetSize(int(os.Stdin.Fd()))
+  fmt.Printf("\033[%d;1H\033[K\033[31m%s", rows + 1, prompt)
+  line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+  oldState, _ = term.MakeRaw(int(os.Stdin.Fd()))
+  return line
+}
+
+func remoteShell(w *buffer.Window, line string) (buf *bytes.Buffer) {
+  buf = new(bytes.Buffer)
+  ros := rexec.NewROS(client)   
+  cmd, err := ros.Command(line)
+  if err != nil {
+    showError(err)
+    return
+  }
+  inf, _ := cmd.StdinPipe()
+  outf, _ := cmd.StdoutPipe()
+  errf, _ := cmd.StderrPipe()
+  if err := cmd.Start(); err != nil {
+    showError(err)
+    return
+  }
+  io.Copy(inf, w.NewReader())
+  inf.Close()
+  errs, _ := ioutil.ReadAll(errf)
+  if len(errs) > 0 {
+    showError(fmt.Errorf("%s", errs))
+    return
+  }
+  io.Copy(buf, outf)
+  if err := cmd.Wait(); err != nil {
+    showError(err)
+    return
+  }
+  return
+}
+
+func showError(err error) {
+  readLine(fmt.Sprintf("%s", err))
+}
+
+func showMsg(s string) {
+  readLine(s)
+}
+
+func show(s string) {
+  // TODO spawn `more` pager
+  showMsg(s)
+}
 
 func main() {
   name := "/proc/cpuinfo"
@@ -42,6 +95,7 @@ func main() {
     HostKeyCallback: ssh.InsecureIgnoreHostKey(),
   }
   c, err := ssh.Dial("tcp", "localhost:22", &config)
+  client = c
   if err != nil {
     panic(err)
   }
@@ -53,13 +107,13 @@ func main() {
     panic(err)
   }
   ras := raster.New(rows, cols)
-  oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+  oldState, err = term.MakeRaw(int(os.Stdin.Fd()))
   if err != nil {
     panic(err)
   }
   defer term.Restore(int(os.Stdin.Fd()), oldState)
   in := bufio.NewReader(os.Stdin)
-  w := buf.Window(25, 80)
+  w := buf.Window(name, 25, 80)
   mode := 'x'
   clip := ""
   for {
@@ -69,7 +123,11 @@ func main() {
     if err != nil {
       panic(err)
     }
-    if rn == '\033' {
+    if rn == ':' {
+      show(remoteShell(w, readLine(":")).String())
+    } else if rn == '>' {
+      w.InsertString(remoteShell(w, readLine(">")).String())
+    } else if rn == '\033' {
       mode = 'x'
       w.ClearMark()
     } else if mode == 'i' {
@@ -89,8 +147,6 @@ func main() {
       case '0': w.Home()
       case '$': w.End()
       case 'A': w.End(); mode = 'i'
-      case '[': w.FindReverse(leftBrackets)
-      case ']': w.Find(rightBrackets)
       case 13:  w.Plumb()
       case 'y': clip = w.Yank()
       case 'p': w.InsertString(clip)
